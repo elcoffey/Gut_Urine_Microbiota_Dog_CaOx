@@ -1,0 +1,100 @@
+#initial processing: urine samples
+
+module load qiime2/2023.2
+
+qiime demux summarize \
+  --i-data demux-paired-end.qza \
+  --o-visualization demux-summary.qzv
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs demux-paired-end.qza \
+  --p-trim-left-f 19 \
+  --p-trim-left-r 19 \
+  --p-trunc-len-f 240 \
+  --p-trunc-len-r 200 \
+  --o-table table.qza \
+  --o-representative-sequences rep-seqs.qza \
+  --o-denoising-stats denoising-stats.qza
+
+qiime feature-table summarize \
+  --i-table table.qza \
+  --o-visualization table.qzv \
+  --m-sample-metadata-file metadata.tsv
+
+qiime tools export \
+  --input-path table.qza \
+  --output-path exported-feature-table
+
+biom convert \
+  -i exported-feature-table/feature-table.biom \
+  -o exported-feature-table/table.tsv \
+  --to-tsv
+
+wget https://data.qiime2.org/2023.2/common/silva-138-99-515-806-nb-classifier.qza
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier silva-138-99-515-806-nb-classifier.qza \
+  --i-reads rep-seqs.qza \
+  --o-classification taxonomy.qza
+
+qiime tools export \
+  --input-path taxonomy.qza \
+  --output-path exported-taxonomy
+
+##export for filtering and decontam
+
+# load libraries
+library(phyloseq); packageVersion("phyloseq")
+library(ggplot2); packageVersion("ggplot2")
+library(decontam); packageVersion("decontam")
+library(labdsv); packageVersion("labdsv")
+
+# load data (mitochondria, chloroplasts, chimeras removed)
+ASV_raw <- read.csv("urine_sig16s_raw.csv", header = TRUE, row.names = 1)
+Meta <- read.csv("metadata.csv", header = TRUE, row.names = 1)
+
+#remove ASVs with 10 or less reads across dataset AND present in < 2 samples
+ASV.sums <- colSums(ASV_raw)
+ASV_filtered <- ASV_raw[,which(ASV.sums >10)]      
+ASV_filtered <- dropspc(ASV_filtered, 1)    
+
+#ensure matching samples between metadata and ASV table
+ASV_filtered <- ASV_filtered[order(rownames(ASV_filtered)), ]
+Meta <- Meta[order(rownames(Meta)), ]
+stopifnot(identical(rownames(Meta), rownames(ASV_filtered)))
+
+#create phyloseq object
+ps <- phyloseq(
+  otu_table(ASV_filtered, taxa_are_rows = FALSE),
+  sample_data(Meta)
+)
+
+#inspect library size
+df <- as.data.frame(sample_data(ps))
+df$LibrarySize <- sample_sums(ps)
+df <- df[order(df$LibrarySize), ]
+df$index <- seq_len(nrow(df))
+ggplot(df, aes(x = index, y = LibrarySize, color = SampleType)) +
+  geom_point() +
+  theme_classic()
+
+#identify contaminants using prevalence method
+sample_data(ps)$is.neg <- sample_data(ps)$SampleType == "Control"
+contam_prev <- isContaminant(ps, method = "combined", neg = "is.neg", threshold = 0.5)
+
+#summary of contaminants
+table(contam_prev$contaminant)
+hist(contam_prev$p, 50)
+
+#remove contaminants
+ps_clean <- prune_taxa(!contam_prev$contaminant, ps)
+
+#export contaminant info and cleaned ASV table
+write.csv(contam_prev, "Filtered_contam_prev0.5.csv")
+write.csv(as.data.frame(otu_table(ps_clean)), "urine_sig_postdecontam.csv")
+
+#reload ASV table after manual removal of controls
+#perform relative abundance transformation
+urine_RA <- read.csv("urine_sig_postdecontam_noctrl.csv", header = TRUE, row.names = 1)
+OTU_RA <- make_relative(as.matrix(urine_RA))
+urine_OTU_percent <- OTU_RA * 100
