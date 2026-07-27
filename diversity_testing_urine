@@ -1,0 +1,71 @@
+#libraries
+library(vegan); packageVersion("vegan")
+library(labdsv); packageVersion("labdsv")
+library(phyloseq); packageVersion("phyloseq")
+library(ggplot2); packageVersion("ggplot2")
+library(dplyr)
+library (ape)
+
+meta <- read.csv("metadata.csv", row.names = 1, header = T)
+ASV <- urine_OTU_percent
+
+#phyloseq
+PS_OTU <- read.csv("PS_sig_urine.csv", row.names = 1, header = T) 
+PS_OTU <- PS_OTU[rownames(meta), ]
+stopifnot(identical(rownames(meta), rownames(PS_OTU)))
+PS_OTU <- otu_table(PS_OTU, taxa_are_rows = FALSE)
+PS_Meta <- sample_data(meta)
+taxa <- read.csv("PS_taxonomy_sig.csv", header = T)
+taxa2 <- taxa[,-1]
+taxa2 <- as.matrix(taxa2)
+rownames(taxa2) <- taxa[,1]
+PS_Taxa <- tax_table(taxa2)
+PS <- phyloseq(PS_OTU, PS_Meta, PS_Taxa)
+PS1 = merge_phyloseq(PS, actual_tree)
+
+#alpha diversity 
+
+#shannon
+shannon <- estimate_richness(PS, measures = "Shannon")
+shannon <- as.numeric(unlist(shannon))
+wilcox.test(shannon ~ meta$Group)
+
+#inverse simpson
+invsimp <- estimate_richness(PS, measures = "InvSimpson")
+invsimp <- as.numeric(unlist(invsimp))
+wilcox.test(invsimp ~ meta$Group)
+
+#observed richness 
+taxa.obs <- rowSums(ASV >0)
+wilcox.test(taxa.obs ~ meta$Group)
+
+
+#beta diversity
+
+taxa.diss <- vegdist(ASV, method = "bray") #bray
+adonis2(taxa.diss ~ Group, data = meta, permutations = 1000)
+wuf <- phyloseq::distance(PS1, method = "wunifrac") #wuf
+adonis2(wuf ~ Group, data = meta, permutations = 1000)
+uuf <- phyloseq::distance(PS1, method = "unifrac") #uuf
+adonis2(uuf ~ Group, data = meta, permutations = 1000)
+taxa.diss <- vegdist(ASV, method = "jaccard") #jaccard
+adonis2(taxa.diss ~ Group, data = meta, permutations = 1000)
+
+#differential abundance testing (showing at asv level)
+taxa.indval <- indval(dropspc(ASV,3), meta$Group) 
+summary(taxa.indval)
+gr<-taxa.indval$maxcls[taxa.indval$pval<0.05]
+iv<-taxa.indval$indcls[ taxa.indval$pval<0.05]
+pv<-taxa.indval$pval[ taxa.indval$pval<0.05]
+taxa.indval.report<-data.frame(gr,iv,pv)
+taxa.indval.report <- taxa.indval.report [order(taxa.indval.report $gr, - taxa.indval.report $iv),]
+write.csv(taxa.indval.report, "ASV.indval.report.urine.csv")
+
+#wilcoxon and FDR adjustment
+ASV_2 <- read.csv(“asvs_IV0.3.csv”, row.names = 1, header = T)
+pvalues <- apply(ASV_2, 2, function(xx) wilcox.test(xx ~ meta$Group, correct = FALSE)$p.value)
+qvalues <- p.adjust(pvalues, 'fdr')
+write.csv(qvalues, "wilcox_test_taxa_adjusted2.csv")
+write.csv(pvalues, "wilcox_test_urine_rawP.csv")
+
+
